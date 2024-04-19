@@ -37,6 +37,10 @@ $keyboardTimer = $null
 $serverConnected = $false
 $lastDisconnectTime = $null
 
+# 本地日誌記錄
+$localLogs = @()
+$lastLogSyncTime = $null
+
 while ($true) {
     # 檢查是否有其他視窗遮住 Edge 或 Edge 被取消全螢幕
     $topWindow = (Get-Process | Where-Object {$_.MainWindowHandle -ne 0 -and $_.MainWindowHandle -ne $edgeWindow} | Sort-Object -Property MainWindowTitle | Select-Object -Last 1).MainWindowHandle
@@ -47,8 +51,15 @@ while ($true) {
         $wshell.Popup("警告: 您正在使用非考試軟體,警告第 $($warnCount + 1) 次。如果警告次數超過 3 次,將會鎖定鍵盤和滑鼠,需要按下 Ctrl+Alt+Win+J 後輸入密碼才能解除。", 0, "注意", 0x1)
         $warnCount++
         
-        # 發送日誌到伺服器
+        # 記錄本地日誌
         $logMessage = "Edge 視窗被遮擋或取消全螢幕, 警告次數: $warnCount"
+        $logEntry = @{
+            Message = $logMessage
+            Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        }
+        $localLogs += $logEntry
+        
+        # 發送日誌到伺服器
         SendLogToServer $logMessage
         
         if ($warnCount -ge 3) {
@@ -73,6 +84,11 @@ while ($true) {
     foreach ($tab in $edgeTabs) {
         if ($tab -notlike "http://192.168.6.2/*" -and $tab -ne "about:blank") {
             $logMessage = "使用者訪問了非預期網頁: $tab"
+            $logEntry = @{
+                Message = $logMessage
+                Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            }
+            $localLogs += $logEntry
             SendLogToServer $logMessage
         }
     }
@@ -83,6 +99,11 @@ while ($true) {
         $serverConnected = $true
         $lastDisconnectTime = $null
         $logMessage = "已連線到伺服器"
+        $logEntry = @{
+            Message = $logMessage
+            Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        }
+        $localLogs += $logEntry
         SendLogToServer $logMessage
     }
     catch {
@@ -90,6 +111,11 @@ while ($true) {
         if ($lastDisconnectTime -eq $null) {
             $lastDisconnectTime = Get-Date
             $logMessage = "與伺服器斷連"
+            $logEntry = @{
+                Message = $logMessage
+                Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            }
+            $localLogs += $logEntry
             SendLogToServer $logMessage
         }
         else {
@@ -112,28 +138,46 @@ while ($true) {
         }
     }
     
-    Start-Sleep -Milliseconds 100
-}
+    # 定期與伺服器同步日誌
+    if ($serverConnected -and ($lastLogSyncTime -eq $null -or ((Get-Date) - $lastLogSyncTime).TotalMinutes -ge 5)) {
+		try {
+			$client = New-Object System.Net.Sockets.TCPClient('192.168.6.2', 8000)
+			$stream = $client.GetStream()# 發送本地日誌到伺服器
+			$logData = ConvertTo-Json $localLogs -Compress
+			$logBytes = [System.Text.Encoding]::UTF8.GetBytes($logData)
+			$stream.Write($logBytes, 0, $logBytes.Length)
+			$stream.Flush()
+			
+			# 接收伺服器日誌
+			$buffer = New-Object System.Byte[] 1024
+			$receivedData = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $stream.Read($buffer, 0, $buffer.Length))
+			$serverLogs = ConvertFrom-Json $receivedData
+			
+			# 合併本地日誌和伺服器日誌
+			$localLogs = $localLogs + ($serverLogs | Where-Object { $_.Timestamp -gt ($localLogs[-1].Timestamp) })
+			
+			$lastLogSyncTime = Get-Date
+			$client.Close()
+		}
+		catch {
+			# 捕獲連線失敗的異常
+		}
+	}
 
-function Enable-Keyboard {
-    $keyboardEnabled = $true
-    $keyboardTimer = [System.Threading.Timer]::New({
-        $keyboardEnabled = $false
-    }, $null, 10000, -1)
+	Start-Sleep -Milliseconds 100
 }
-
 function SendLogToServer($message) {
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
-        $client = New-Object System.Net.Sockets.TCPClient('192.168.6.2', 8000)
-        $stream = $client.GetStream()
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush()
-        $client.Close()
-    }
-    catch {
-        # 捕獲連線失敗的異常
-    }
+	try {
+	$bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+	$client = New-Object System.Net.Sockets.TCPClient('192.168.6.2', 8000)
+	$stream = $client.GetStream()
+	$stream.Write($bytes, 0, $bytes.Length)
+	$stream.Flush()
+	$client.Close()
+	}
+	catch {
+	# 捕獲連線失敗的異常
+	}
 }
 
 Register-HotKey -Modifiers "Control, Alt, Win" -Key "J" -Action { Enable-Keyboard }

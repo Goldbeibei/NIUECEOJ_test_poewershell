@@ -60,6 +60,25 @@ while True:
             logs[ip] = []
         logs[ip].append(log_entry)
 
+        # 接收本地日誌並合併
+        received_logs = json.loads(connection.recv(1024).decode('utf-8'))
+        for log in received_logs:
+            timestamp = datetime.strptime(log['Timestamp'], '%Y-%m-%d %H:%M:%S')
+            log_entry = {
+                'message': log['Message'],
+                'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            if ip not in logs:
+                logs[ip] = []
+            logs[ip].append(log_entry)
+
+        # 返回合併後的日誌數據
+        merged_logs = []
+        for log_entries in logs.values():
+            merged_logs.extend(log_entries)
+        merged_logs.sort(key=lambda x: x['timestamp'], reverse=True)
+        connection.sendall(json.dumps(merged_logs).encode('utf-8'))
+
     finally:
         # 清理連線
         connection.close()
